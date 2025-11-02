@@ -642,18 +642,23 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
 @app.post("/login", response_model=Token)
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     """Traditional login with email and password (for admins and legacy users)"""
+    print(f"Login attempt for: {form_data.username}")
     user = db.query(User).filter(User.email == form_data.username).first()
+    print(f"User found: {user is not None}")
     if not user or not verify_password(form_data.password, user.password_hash):
+        print("Authentication failed")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
     
+    print("Authentication successful, creating token")
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user.email}, expires_delta=access_token_expires
     )
+    print("Token created successfully")
     return {"access_token": access_token, "token_type": "bearer"}
 
 @app.post("/admin-login", response_model=Token)
