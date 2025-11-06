@@ -3,11 +3,11 @@ from fastapi import FastAPI, File, UploadFile, Depends, HTTPException, Query, Fo
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, ForeignKey, Text, Enum as SQLEnum, DateTime
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, ForeignKey, Text, Enum as SQLEnum, DateTime, text
 from sqlalchemy.orm import declarative_base, Session, sessionmaker, relationship
 from pydantic import BaseModel, EmailStr, ConfigDict
 from typing import Optional, List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 import shutil
 import os
@@ -90,6 +90,22 @@ else:
         }
     )
 
+# Validate DB connectivity; fall back to SQLite for local development if PostgreSQL is unavailable
+try:
+    with engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+except Exception as e:
+    if DATABASE_URL.startswith("postgresql://") and ("localhost" in DATABASE_URL or "127.0.0.1" in DATABASE_URL):
+        print("WARNING: PostgreSQL at localhost:5432 is not reachable. Falling back to local SQLite database 'paper_portal.db' for development.")
+        DATABASE_URL = "sqlite:///paper_portal.db"
+        engine = create_engine(
+            DATABASE_URL,
+            connect_args={"check_same_thread": False},
+            pool_pre_ping=True,
+        )
+    else:
+        raise
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -130,8 +146,20 @@ class User(Base):
     name = Column(String, nullable=False)
     password_hash = Column(String, nullable=False)
     is_admin = Column(Boolean, default=False)
+    # Profile fields 
+    age = Column(Integer, nullable=True)
+    year = Column(String(20), nullable=True)
+    university = Column(String(255), nullable=True)
+    department = Column(String(255), nullable=True)
+    roll_no = Column(String(100), nullable=True)
+    student_id = Column(String(100), nullable=True)
+    photo_path = Column(String(500), nullable=True)
+    id_card_path = Column(String(500), nullable=True)
+    id_verified = Column(Boolean, default=False)
+    verified_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    verified_at = Column(DateTime, nullable=True)
     email_verified = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     
     papers = relationship("Paper", foreign_keys="Paper.uploaded_by", back_populates="uploader")
 
@@ -142,8 +170,8 @@ class Course(Base):
     code = Column(String(50), unique=True, nullable=False, index=True)
     name = Column(String(255), nullable=False)
     description = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     papers = relationship("Paper", back_populates="course")
 
@@ -169,8 +197,8 @@ class Paper(Base):
     reviewed_at = Column(DateTime)
     rejection_reason = Column(Text)
     
-    uploaded_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    uploaded_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     course = relationship("Course", back_populates="papers")
     uploader = relationship("User", foreign_keys=[uploaded_by], back_populates="papers")
@@ -200,6 +228,16 @@ class UserResponse(BaseModel):
     name: str
     is_admin: bool
     email_verified: bool
+    # extended profile fields
+    age: Optional[int] = None
+    year: Optional[str] = None
+    university: Optional[str] = None
+    department: Optional[str] = None
+    roll_no: Optional[str] = None
+    student_id: Optional[str] = None
+    photo_path: Optional[str] = None
+    id_card_path: Optional[str] = None
+    id_verified: bool
     created_at: datetime
 
 # OTP Schemas
@@ -282,9 +320,9 @@ def get_password_hash(password):
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = datetime.now(timezone.utc) + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
+        expire = datetime.now(timezone.utc) + timedelta(minutes=15)
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
@@ -730,7 +768,7 @@ def send_otp(request: SendOTPRequest, db: Session = Depends(get_db)):
     # Store OTP with expiration (10 minutes)
     otp_storage[request.email] = {
         "otp": otp,
-        "expires_at": datetime.utcnow() + timedelta(minutes=10)
+        "expires_at": datetime.now(timezone.utc) + timedelta(minutes=10)
     }
     
     # Send email
@@ -747,7 +785,7 @@ def verify_otp(request: VerifyOTPRequest, db: Session = Depends(get_db)):
     stored_otp = otp_storage[request.email]
     
     # Check if OTP is expired
-    if datetime.utcnow() > stored_otp["expires_at"]:
+    if datetime.now(timezone.utc) > stored_otp["expires_at"]:
         del otp_storage[request.email]
         raise HTTPException(status_code=400, detail="OTP has expired")
     
@@ -869,6 +907,92 @@ def get_current_user_info(current_user: User = Depends(get_current_user)):
     """Get current logged in user info"""
     return current_user
 
+# ========== Profile Endpoints ==========
+class ProfileUpdate(BaseModel):
+    age: Optional[int] = None
+    year: Optional[str] = None
+    university: Optional[str] = None
+    department: Optional[str] = None
+    roll_no: Optional[str] = None
+    student_id: Optional[str] = None
+
+
+@app.put("/profile", response_model=UserResponse)
+def update_profile(update: ProfileUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    user = db.query(User).filter(User.id == current_user.id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    for field, value in update.dict(exclude_unset=True).items():
+        setattr(user, field, value)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@app.post("/profile/photo", response_model=UserResponse)
+async def upload_photo(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    allowed = {".jpg", ".jpeg", ".png", ".webp"}
+    ext = Path(file.filename).suffix.lower()
+    if ext not in allowed:
+        raise HTTPException(status_code=400, detail="Invalid image type")
+    save_path = UPLOAD_DIR / f"photo_{current_user.id}_{int(datetime.now(timezone.utc).timestamp())}{ext}"
+    with save_path.open("wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    current_user.photo_path = str(save_path)
+    db.commit()
+    db.refresh(current_user)
+    return current_user
+
+
+@app.post("/profile/id-card", response_model=UserResponse)
+async def upload_id_card(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    allowed = {".jpg", ".jpeg", ".png", ".pdf"}
+    ext = Path(file.filename).suffix.lower()
+    if ext not in allowed:
+        raise HTTPException(status_code=400, detail="Invalid file type")
+    save_path = UPLOAD_DIR / f"id_{current_user.id}_{int(datetime.now(timezone.utc).timestamp())}{ext}"
+    with save_path.open("wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    current_user.id_card_path = str(save_path)
+    current_user.id_verified = False
+    current_user.verified_by = None
+    current_user.verified_at = None
+    db.commit()
+    db.refresh(current_user)
+    return current_user
+
+
+@app.get("/admin/verification-requests", response_model=List[UserResponse])
+def list_verification_requests(db: Session = Depends(get_db), admin: User = Depends(require_admin)):
+    users = db.query(User).filter(User.id_card_path.isnot(None), User.id_verified == False).all()
+    return users
+
+
+class VerifyAction(BaseModel):
+    approve: bool
+    reason: Optional[str] = None
+
+
+@app.post("/admin/verify-user/{user_id}", response_model=UserResponse)
+def verify_user(user_id: int, action: VerifyAction, db: Session = Depends(get_db), admin: User = Depends(require_admin)):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.id_verified = bool(action.approve)
+    user.verified_by = admin.id if action.approve else None
+    user.verified_at = datetime.now(timezone.utc) if action.approve else None
+    db.commit()
+    db.refresh(user)
+    return user
+
 # ========== Admin Dashboard ==========
 @app.get("/admin/dashboard", response_model=DashboardStats)
 def get_dashboard_stats(db: Session = Depends(get_db), admin: User = Depends(require_admin)):
@@ -987,7 +1111,7 @@ def update_course(
     for field, value in update_data.items():
         setattr(course, field, value)
     
-    course.updated_at = datetime.utcnow()
+    course.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(course)
     return course
@@ -1029,7 +1153,7 @@ async def upload_paper(
         raise HTTPException(status_code=400, detail="Invalid file type")
     
     # Save file
-    file_path = UPLOAD_DIR / f"{datetime.utcnow().timestamp()}_{file.filename}"
+    file_path = UPLOAD_DIR / f"{datetime.now(timezone.utc).timestamp()}_{file.filename}"
     with file_path.open("wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
     
@@ -1147,7 +1271,7 @@ def review_paper(
     
     paper.status = review.status
     paper.reviewed_by = admin.id
-    paper.reviewed_at = datetime.utcnow()
+    paper.reviewed_at = datetime.now(timezone.utc)
     paper.rejection_reason = review.rejection_reason
     
     db.commit()
@@ -1201,7 +1325,7 @@ def edit_paper(
     if semester:
         paper.semester = semester
     
-    paper.updated_at = datetime.utcnow()
+    paper.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(paper)
     
@@ -1324,4 +1448,5 @@ def root():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run(app, host="0.0.0.0", port=port)
