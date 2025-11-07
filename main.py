@@ -61,7 +61,7 @@ elif RESEND_CONFIGURED:
     print("\n✓ Resend email service configured")
     resend.api_key = RESEND_API_KEY
 elif GMAIL_CONFIGURED:
-    print("\n✓ Gmail SMTP email service configured (may have network restrictions on Railway)")
+    print("\n✓ Gmail SMTP email service configured (may have network restrictions on some cloud platforms)")
 print("\n")
 
 # Database setup with Neon DB support
@@ -569,8 +569,8 @@ def send_otp_email(email: str, otp: str):
                 
             except (smtplib.SMTPException, OSError) as e:
                 print(f"❌ Gmail SMTP error: {type(e).__name__}: {e}")
-                print(f"   Note: Railway may have SMTP network restrictions")
-                print(f"   Recommendation: Use Resend instead")
+                print(f"   Note: Some cloud platforms (Render, Railway, etc.) may block SMTP connections")
+                print(f"   Recommendation: Use Resend instead (works on all platforms)")
                 print(f"   Get free API key at https://resend.com\n")
                 return True
             
@@ -729,7 +729,7 @@ def email_health_check():
             status_info["providers"]["gmail"] = {
                 "status": "connection_failed",
                 "error": str(e),
-                "note": "Railway may have outbound SMTP network restrictions"
+                "note": "Some cloud platforms (Render, Railway, etc.) may block outbound SMTP connections"
             }
         
         except Exception as e:
