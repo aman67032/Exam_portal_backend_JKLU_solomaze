@@ -772,9 +772,20 @@ def send_otp(request: SendOTPRequest, db: Session = Depends(get_db)):
     }
     
     # Send email
-    send_otp_email(request.email, otp)
+    email_sent = send_otp_email(request.email, otp)
     
-    return {"message": "OTP sent to your email", "email": request.email}
+    # Return response with email status
+    response = {
+        "message": "OTP sent to your email" if EMAIL_CONFIGURED else "OTP generated (check console/logs for code)",
+        "email": request.email,
+        "email_configured": EMAIL_CONFIGURED,
+        "otp_sent": email_sent
+    }
+    
+    if not EMAIL_CONFIGURED:
+        response["warning"] = "Email not configured. OTP is shown in server logs. Configure RESEND_API_KEY or GMAIL_USER/GMAIL_PASS."
+    
+    return response
 
 @app.post("/verify-otp")
 def verify_otp(request: VerifyOTPRequest, db: Session = Depends(get_db)):

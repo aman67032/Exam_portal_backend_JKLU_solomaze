@@ -1,16 +1,52 @@
 # Email Configuration Guide
 
-## ⚠️ Current Issue: Network Unreachable on Railway
+## 🚀 Quick Setup (Recommended: Resend)
 
-The logs show `[Errno 101] Network is unreachable` when trying to send OTP emails. This indicates:
+**Resend is the easiest and most reliable option** - no SMTP port restrictions!
 
-1. **Railway environment** may have restricted outbound SMTP connections
-2. **Gmail credentials** in `.env` might be incorrect
-3. **Network firewall** blocking port 587 (TLS SMTP)
+### Step 1: Get Resend API Key
+1. Go to: https://resend.com
+2. Sign up for free account
+3. Go to API Keys section
+4. Create a new API key
+5. Copy the key (starts with `re_`)
+
+### Step 2: Set Environment Variables
+
+**For Local Development (.env file):**
+```properties
+RESEND_API_KEY=re_your_api_key_here
+RESEND_FROM_EMAIL=onboarding@resend.dev
+
+re_SLk43w82_88KWYiDypZ792ieVxSvKqpy2
+```
+
+**For Railway/Production:**
+1. Go to your Railway project
+2. Click on your service → Variables tab
+3. Add:
+   - `RESEND_API_KEY` = `re_your_api_key_here`
+   - `RESEND_FROM_EMAIL` = `onboarding@resend.dev` (or your verified domain)
+
+### Step 3: Verify Setup
+```bash
+curl https://your-backend-url.com/health/email
+```
+
+You should see:
+```json
+{
+  "status": "healthy",
+  "active_provider": "resend",
+  "message": "Email service ready via resend"
+}
+```
 
 ---
 
-## ✅ Solution 1: Verify & Fix Gmail Configuration
+## ⚠️ Alternative: Gmail SMTP (May have network restrictions)
+
+**Note:** Railway may block SMTP connections. Use Resend if possible.
 
 ### Step 1: Use Gmail App Password (NOT regular password)
 
