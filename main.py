@@ -607,10 +607,26 @@ def send_otp_email(email: str, otp: str):
                 print(f"   OTP: {otp}")
                 return True
             except Exception as e:
+                error_msg = str(e)
                 print(f"❌ Resend error: {type(e).__name__}: {e}")
                 print(f"   From: {RESEND_FROM_EMAIL}")
                 print(f"   To: {email}")
                 print(f"   API Key configured: {'Yes' if RESEND_API_KEY else 'No'}")
+                
+                # Check if it's the domain verification error
+                if "testing emails" in error_msg.lower() or "verify a domain" in error_msg.lower():
+                    print(f"\n   ⚠️  Resend limitation detected:")
+                    print(f"   The default 'onboarding@resend.dev' only allows sending to your own email.")
+                    print(f"   Solutions:")
+                    print(f"   1. Verify a domain at https://resend.com/domains and update RESEND_FROM_EMAIL")
+                    print(f"   2. Configure SMTP (Gmail) as fallback - see EMAIL_SETUP_GUIDE.md")
+                    print(f"   3. For Gmail SMTP, set these environment variables:")
+                    print(f"      SMTP_SERVER=smtp.gmail.com")
+                    print(f"      SMTP_PORT=587")
+                    print(f"      SMTP_USER=your-email@gmail.com")
+                    print(f"      SMTP_PASS=your-app-password")
+                    print(f"      (Get app password: https://myaccount.google.com/apppasswords)\n")
+                
                 print(f"   Falling back to SMTP...\n")
         
         # Fallback to SMTP if Resend fails or not configured
@@ -655,7 +671,16 @@ def send_otp_email(email: str, otp: str):
                 return True
         
         # If we get here, no email service worked
-        print(f"⚠️  No email service available for sending\n")
+        print(f"⚠️  No email service available for sending")
+        print(f"\n   To fix this, configure SMTP (Gmail recommended):")
+        print(f"   1. Create Gmail App Password: https://myaccount.google.com/apppasswords")
+        print(f"   2. Set environment variables:")
+        print(f"      SMTP_SERVER=smtp.gmail.com")
+        print(f"      SMTP_PORT=587")
+        print(f"      SMTP_USER=your-email@gmail.com")
+        print(f"      SMTP_PASS=your-16-char-app-password")
+        print(f"   3. Restart your server")
+        print(f"\n   See EMAIL_SETUP_GUIDE.md for detailed instructions.\n")
         return True
     
     except Exception as e:
