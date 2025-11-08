@@ -3,8 +3,8 @@ from fastapi import FastAPI, File, UploadFile, Depends, HTTPException, Query, Fo
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, ForeignKey, Text, Enum as SQLEnum, DateTime, text
-from sqlalchemy.orm import declarative_base, Session, sessionmaker, relationship
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, ForeignKey, Text, Enum as SQLEnum, DateTime, text, Index
+from sqlalchemy.orm import declarative_base, Session, sessionmaker, relationship, joinedload
 from pydantic import BaseModel, EmailStr, ConfigDict
 from typing import Optional, List
 from datetime import datetime, timedelta, timezone
@@ -131,6 +131,30 @@ otp_storage = {}
 # In-memory registration data storage (use Redis for production)
 registration_storage = {}
 
+# Background task: Clean up expired OTPs and registration data
+def cleanup_expired_data():
+    """Clean up expired OTPs and registration data"""
+    current_time = datetime.now(timezone.utc)
+    
+    # Clean expired OTPs
+    expired_emails = [
+        email for email, data in otp_storage.items()
+        if current_time > data.get("expires_at", datetime.min.replace(tzinfo=timezone.utc))
+    ]
+    for email in expired_emails:
+        del otp_storage[email]
+    
+    # Clean expired registration data
+    expired_reg_emails = [
+        email for email, data in registration_storage.items()
+        if current_time > data.get("expires_at", datetime.min.replace(tzinfo=timezone.utc))
+    ]
+    for email in expired_reg_emails:
+        del registration_storage[email]
+    
+    if expired_emails or expired_reg_emails:
+        print(f"🧹 Cleaned up {len(expired_emails)} expired OTPs and {len(expired_reg_emails)} expired registration sessions")
+
 # ========== Enums ==========
 class PaperType(str, Enum):
     QUIZ = "quiz"
@@ -187,30 +211,37 @@ class Paper(Base):
     __tablename__ = "papers"
     
     id = Column(Integer, primary_key=True, index=True)
-    course_id = Column(Integer, ForeignKey("courses.id", ondelete="CASCADE"))
-    uploaded_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"))
+    course_id = Column(Integer, ForeignKey("courses.id", ondelete="CASCADE"), index=True)
+    uploaded_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), index=True)
     
-    title = Column(String(255), nullable=False)
+    title = Column(String(255), nullable=False, index=True)
     description = Column(Text)
-    paper_type = Column(SQLEnum(PaperType), nullable=False)
-    year = Column(Integer)
-    semester = Column(String(20))
+    paper_type = Column(SQLEnum(PaperType), nullable=False, index=True)
+    year = Column(Integer, index=True)
+    semester = Column(String(20), index=True)
     
     file_path = Column(String(500), nullable=False)
     file_name = Column(String(255), nullable=False)
     file_size = Column(Integer)
     
-    status = Column(SQLEnum(SubmissionStatus), default=SubmissionStatus.PENDING)
+    status = Column(SQLEnum(SubmissionStatus), default=SubmissionStatus.PENDING, index=True)
     reviewed_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"))
     reviewed_at = Column(DateTime)
     rejection_reason = Column(Text)
     
-    uploaded_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    uploaded_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
-    course = relationship("Course", back_populates="papers")
-    uploader = relationship("User", foreign_keys=[uploaded_by], back_populates="papers")
-    reviewer = relationship("User", foreign_keys=[reviewed_by])
+    course = relationship("Course", back_populates="papers", lazy="joined")
+    uploader = relationship("User", foreign_keys=[uploaded_by], back_populates="papers", lazy="joined")
+    reviewer = relationship("User", foreign_keys=[reviewed_by], lazy="select")
+    
+    # Composite indexes for common query patterns
+    __table_args__ = (
+        Index('idx_paper_status_uploaded', 'status', 'uploaded_at'),
+        Index('idx_paper_course_status', 'course_id', 'status'),
+        Index('idx_paper_type_year', 'paper_type', 'year'),
+    )
 
 # Create tables
 Base.metadata.create_all(bind=engine)
@@ -698,10 +729,28 @@ except Exception as e:
 @app.get("/health")
 def health_check():
     """Check API health and configuration status"""
+    # Test database connection
+    db_status = "unknown"
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+            db_status = "connected"
+    except Exception as e:
+        db_status = f"error: {str(e)[:50]}"
+    
     return {
         "status": "healthy",
-        "database": "connected" if "neon.tech" in DATABASE_URL else "local",
-        "email": "configured" if EMAIL_CONFIGURED else "console_only"
+        "database": {
+            "status": db_status,
+            "url": DATABASE_URL.split("@")[-1] if "@" in DATABASE_URL else "local",
+            "type": "neon" if "neon.tech" in DATABASE_URL else ("postgresql" if DATABASE_URL.startswith("postgresql") else "sqlite")
+        },
+        "email": "configured" if EMAIL_CONFIGURED else "console_only",
+        "optimizations": {
+            "eager_loading": True,
+            "indexes": "configured (run add_indexes.py for existing databases)",
+            "connection_pooling": True
+        }
     }
 
 @app.get("/health/email")
@@ -1442,14 +1491,22 @@ def get_papers(
     if semester:
         query = query.filter(Paper.semester == semester)
     
-    papers = query.order_by(Paper.uploaded_at.desc()).all()
+    # Optimize: Use eager loading to avoid N+1 queries
+    papers = query.options(
+        joinedload(Paper.course),
+        joinedload(Paper.uploader)
+    ).order_by(Paper.uploaded_at.desc()).all()
     
     return [format_paper_response(paper, current_user.is_admin) for paper in papers]
 
 @app.get("/papers/pending", response_model=List[PaperResponse])
 def get_pending_papers(db: Session = Depends(get_db), admin: User = Depends(require_admin)):
     """Admin: View pending submissions"""
-    papers = db.query(Paper).filter(Paper.status == SubmissionStatus.PENDING).order_by(Paper.uploaded_at.desc()).all()
+    # Optimize: Use eager loading to avoid N+1 queries
+    papers = db.query(Paper).options(
+        joinedload(Paper.course),
+        joinedload(Paper.uploader)
+    ).filter(Paper.status == SubmissionStatus.PENDING).order_by(Paper.uploaded_at.desc()).all()
     return [format_paper_response(paper, True) for paper in papers]
 
 @app.get("/papers/public/all", response_model=List[PaperResponse])
@@ -1473,13 +1530,21 @@ def get_public_papers(
     if semester:
         query = query.filter(Paper.semester == semester)
     
-    papers = query.order_by(Paper.uploaded_at.desc()).all()
+    # Optimize: Use eager loading to avoid N+1 queries
+    papers = query.options(
+        joinedload(Paper.course),
+        joinedload(Paper.uploader)
+    ).order_by(Paper.uploaded_at.desc()).all()
     return [format_paper_response(paper, False) for paper in papers]
 
 @app.get("/papers/{paper_id}", response_model=PaperResponse)
 def get_paper(paper_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Get a specific paper"""
-    paper = db.query(Paper).filter(Paper.id == paper_id).first()
+    # Optimize: Use eager loading to avoid N+1 queries
+    paper = db.query(Paper).options(
+        joinedload(Paper.course),
+        joinedload(Paper.uploader)
+    ).filter(Paper.id == paper_id).first()
     if not paper:
         raise HTTPException(status_code=404, detail="Paper not found")
     

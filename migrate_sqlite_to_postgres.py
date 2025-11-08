@@ -10,6 +10,13 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
 
+# Import models to create tables
+try:
+    from main import Base, User, Course, Paper
+except ImportError:
+    print("⚠️  Warning: Could not import models. Tables will be created via SQL.")
+    Base = None
+
 # Load environment variables
 load_dotenv()
 
@@ -41,6 +48,75 @@ try:
     sqlite_engine.connect()
     postgres_engine.connect()
     print("✅ Both databases connected\n")
+    
+    # Create tables in PostgreSQL if they don't exist
+    print("🔨 Creating tables in PostgreSQL database...")
+    if Base:
+        # Use SQLAlchemy to create tables
+        Base.metadata.create_all(bind=postgres_engine)
+        print("✅ Tables created using SQLAlchemy models\n")
+    else:
+        # Fallback: Create tables manually via SQL
+        print("⚠️  Creating tables manually (models not available)...")
+        with postgres_engine.connect() as conn:
+            # Create users table
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id SERIAL PRIMARY KEY,
+                    email VARCHAR UNIQUE NOT NULL,
+                    name VARCHAR NOT NULL,
+                    password_hash VARCHAR NOT NULL,
+                    is_admin BOOLEAN DEFAULT FALSE,
+                    email_verified BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    age INTEGER,
+                    year VARCHAR(20),
+                    university VARCHAR(255),
+                    department VARCHAR(255),
+                    roll_no VARCHAR(100),
+                    student_id VARCHAR(100),
+                    photo_path VARCHAR(500),
+                    id_card_path VARCHAR(500),
+                    id_verified BOOLEAN DEFAULT FALSE,
+                    verified_by INTEGER,
+                    verified_at TIMESTAMP
+                )
+            """))
+            # Create courses table
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS courses (
+                    id SERIAL PRIMARY KEY,
+                    code VARCHAR(50) UNIQUE NOT NULL,
+                    name VARCHAR(255) NOT NULL,
+                    description TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            # Create papers table
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS papers (
+                    id SERIAL PRIMARY KEY,
+                    course_id INTEGER REFERENCES courses(id) ON DELETE CASCADE,
+                    uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    title VARCHAR(255) NOT NULL,
+                    description TEXT,
+                    paper_type VARCHAR(10) NOT NULL,
+                    year INTEGER,
+                    semester VARCHAR(20),
+                    file_path VARCHAR(500) NOT NULL,
+                    file_name VARCHAR(255) NOT NULL,
+                    file_size INTEGER,
+                    status VARCHAR(8) DEFAULT 'pending',
+                    reviewed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    reviewed_at TIMESTAMP,
+                    rejection_reason TEXT,
+                    uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            conn.commit()
+        print("✅ Tables created manually\n")
     
     # Get all tables from SQLite
     print("📋 Reading tables from SQLite...")
@@ -77,6 +153,20 @@ try:
             try:
                 # Build INSERT query
                 values = dict(zip(column_names, row))
+                
+                # Convert SQLite boolean integers (0/1) to PostgreSQL booleans (False/True)
+                # Check which columns are boolean in PostgreSQL
+                boolean_columns = ['is_admin', 'email_verified', 'id_verified']
+                for col in boolean_columns:
+                    if col in values and values[col] is not None:
+                        # Convert 0/1 to False/True
+                        values[col] = bool(values[col])
+                
+                # Convert None to NULL for optional fields
+                for col in values:
+                    if values[col] == '':
+                        values[col] = None
+                
                 placeholders = ', '.join([f':{col}' for col in column_names])
                 columns = ', '.join(column_names)
                 
@@ -90,9 +180,11 @@ try:
                 inserted += 1
             except Exception as e:
                 print(f"   ⚠️  Error inserting row: {e}")
+                postgres_session.rollback()
                 continue
         
-        postgres_session.commit()
+        if inserted > 0:
+            postgres_session.commit()
         print(f"   ✅ Migrated {inserted}/{len(rows)} rows\n")
     
     print("✅ Migration completed successfully!")

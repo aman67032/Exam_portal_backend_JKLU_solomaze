@@ -2,7 +2,7 @@ NEON DB CONFIGURATION COMPLETE
 ==============================
 
 DATABASE: Neon DB
-URL: postgresql://neondb_owner:npg_WBolbXfY7s6e@ep-plain-mouse-a13pemef-pooler.ap-southeast-1.aws.neon.tech/neondb
+URL: postgresql://neondb_owner:npg_EAkX0WVqeR5r@ep-polished-bush-a1fj2trf-pooler.ap-southeast-1.aws.neon.tech/neondb
 Region: Asia Pacific (Singapore)
 
 KEY FEATURES CONFIGURED:
