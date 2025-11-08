@@ -1552,7 +1552,8 @@ def delete_course(course_id: int, db: Session = Depends(get_db), admin: User = D
 @app.post("/papers/upload")
 async def upload_paper(
     file: UploadFile = File(...),
-    course_id: int = Form(...),
+    course_id: Optional[int] = Form(None),
+    course_code: Optional[str] = Form(None),
     title: str = Form(...),
     paper_type: PaperType = Form(...),
     description: Optional[str] = Form(None),
@@ -1562,10 +1563,38 @@ async def upload_paper(
     db: Session = Depends(get_db)
 ):
     """Upload a paper for review"""
-    # Validate course exists
-    course = db.query(Course).filter(Course.id == course_id).first()
-    if not course:
-        raise HTTPException(status_code=404, detail="Course not found")
+    # Handle course selection - either course_id or course_code must be provided
+    if not course_id and not course_code:
+        raise HTTPException(status_code=400, detail="Either course_id or course_code must be provided")
+    
+    course = None
+    if course_id:
+        # Use provided course_id
+        course = db.query(Course).filter(Course.id == course_id).first()
+        if not course:
+            raise HTTPException(status_code=404, detail="Course not found")
+    elif course_code:
+        # Validate course code
+        course_code = course_code.strip()
+        if not course_code:
+            raise HTTPException(status_code=400, detail="Course code cannot be empty")
+        
+        # Check if course exists by code
+        course = db.query(Course).filter(Course.code == course_code).first()
+        if not course:
+            # Create new course if it doesn't exist
+            course = Course(
+                code=course_code,
+                name=course_code,  # Use code as name if not provided
+                description=f"Auto-created during paper upload"
+            )
+            db.add(course)
+            db.commit()
+            db.refresh(course)
+    
+    # Validate file
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="File name is required")
     
     # Validate file type
     allowed_extensions = {".pdf", ".jpg", ".jpeg", ".png", ".doc", ".docx"}
@@ -1580,7 +1609,7 @@ async def upload_paper(
     
     # Create paper record
     paper = Paper(
-        course_id=course_id,
+        course_id=course.id,
         uploaded_by=current_user.id,
         title=title,
         description=description,
