@@ -1240,34 +1240,46 @@ def get_current_user_info(current_user: User = Depends(get_current_user)):
 @app.post("/forgot-password")
 def forgot_password(request: ForgotPasswordRequest, db: Session = Depends(get_db)):
     """Send OTP to email for password reset"""
-    # Check if user exists
-    user = db.query(User).filter(User.email == request.email).first()
-    if not user:
-        # Don't reveal if user exists or not for security
+    try:
+        # Check if user exists
+        user = db.query(User).filter(User.email == request.email).first()
+        if not user:
+            # Don't reveal if user exists or not for security
+            return {
+                "message": "If the email exists, a password reset OTP has been sent.",
+                "email": request.email,
+                "success": True
+            }
+        
+        # Generate OTP
+        otp = generate_otp()
+        
+        # Store OTP with expiration (10 minutes) and type
+        password_reset_storage[request.email] = {
+            "otp": otp,
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=10),
+            "type": "password_reset"
+        }
+        
+        # Send email
+        email_sent = send_otp_email(request.email, otp)
+        
         return {
             "message": "If the email exists, a password reset OTP has been sent.",
-            "email": request.email
+            "email": request.email,
+            "email_configured": EMAIL_CONFIGURED,
+            "otp_sent": email_sent,
+            "success": True
         }
-    
-    # Generate OTP
-    otp = generate_otp()
-    
-    # Store OTP with expiration (10 minutes) and type
-    password_reset_storage[request.email] = {
-        "otp": otp,
-        "expires_at": datetime.now(timezone.utc) + timedelta(minutes=10),
-        "type": "password_reset"
-    }
-    
-    # Send email
-    email_sent = send_otp_email(request.email, otp)
-    
-    return {
-        "message": "If the email exists, a password reset OTP has been sent.",
-        "email": request.email,
-        "email_configured": EMAIL_CONFIGURED,
-        "otp_sent": email_sent
-    }
+    except Exception as e:
+        # Log error but don't reveal details to user
+        print(f"Error in forgot_password: {e}")
+        # Still return success message for security
+        return {
+            "message": "If the email exists, a password reset OTP has been sent.",
+            "email": request.email,
+            "success": True
+        }
 
 @app.post("/reset-password")
 def reset_password(request: ResetPasswordRequest, db: Session = Depends(get_db)):
