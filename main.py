@@ -131,6 +131,8 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 otp_storage = {}
 # In-memory registration data storage (use Redis for production)
 registration_storage = {}
+# In-memory password reset data storage (use Redis for production)
+password_reset_storage = {}
 
 # Background task: Clean up expired OTPs and registration data
 def cleanup_expired_data():
@@ -153,8 +155,16 @@ def cleanup_expired_data():
     for email in expired_reg_emails:
         del registration_storage[email]
     
-    if expired_emails or expired_reg_emails:
-        print(f"🧹 Cleaned up {len(expired_emails)} expired OTPs and {len(expired_reg_emails)} expired registration sessions")
+    # Clean expired password reset data
+    expired_reset_emails = [
+        email for email, data in password_reset_storage.items()
+        if current_time > data.get("expires_at", datetime.min.replace(tzinfo=timezone.utc))
+    ]
+    for email in expired_reset_emails:
+        del password_reset_storage[email]
+    
+    if expired_emails or expired_reg_emails or expired_reset_emails:
+        print(f"🧹 Cleaned up {len(expired_emails)} expired OTPs, {len(expired_reg_emails)} expired registration sessions, and {len(expired_reset_emails)} expired password reset sessions")
 
 # ========== Enums ==========
 class PaperType(str, Enum):
@@ -307,6 +317,15 @@ class SendOTPRequest(BaseModel):
 class VerifyOTPRequest(BaseModel):
     email: EmailStr
     otp: str
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+class ResetPasswordRequest(BaseModel):
+    email: EmailStr
+    otp: str
+    new_password: str
+    confirm_password: str
 
 class CourseCreate(BaseModel):
     code: str
@@ -1216,6 +1235,86 @@ def admin_login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = 
 def get_current_user_info(current_user: User = Depends(get_current_user)):
     """Get current logged in user info"""
     return current_user
+
+# ========== Forgot Password Endpoints ==========
+@app.post("/forgot-password")
+def forgot_password(request: ForgotPasswordRequest, db: Session = Depends(get_db)):
+    """Send OTP to email for password reset"""
+    # Check if user exists
+    user = db.query(User).filter(User.email == request.email).first()
+    if not user:
+        # Don't reveal if user exists or not for security
+        return {
+            "message": "If the email exists, a password reset OTP has been sent.",
+            "email": request.email
+        }
+    
+    # Generate OTP
+    otp = generate_otp()
+    
+    # Store OTP with expiration (10 minutes) and type
+    password_reset_storage[request.email] = {
+        "otp": otp,
+        "expires_at": datetime.now(timezone.utc) + timedelta(minutes=10),
+        "type": "password_reset"
+    }
+    
+    # Send email
+    email_sent = send_otp_email(request.email, otp)
+    
+    return {
+        "message": "If the email exists, a password reset OTP has been sent.",
+        "email": request.email,
+        "email_configured": EMAIL_CONFIGURED,
+        "otp_sent": email_sent
+    }
+
+@app.post("/reset-password")
+def reset_password(request: ResetPasswordRequest, db: Session = Depends(get_db)):
+    """Reset password using OTP"""
+    # Validate password match
+    if request.new_password != request.confirm_password:
+        raise HTTPException(status_code=400, detail="Passwords do not match")
+    
+    # Validate password strength
+    if len(request.new_password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    
+    # Check if OTP exists
+    if request.email not in password_reset_storage:
+        raise HTTPException(status_code=400, detail="OTP not found or expired. Please request a new password reset.")
+    
+    stored_data = password_reset_storage[request.email]
+    
+    # Check if this is a password reset OTP
+    if stored_data.get("type") != "password_reset":
+        raise HTTPException(status_code=400, detail="Invalid OTP type. Please use the password reset OTP.")
+    
+    # Check if OTP is expired
+    if datetime.now(timezone.utc) > stored_data["expires_at"]:
+        del password_reset_storage[request.email]
+        raise HTTPException(status_code=400, detail="OTP has expired. Please request a new password reset.")
+    
+    # Check if OTP matches
+    if stored_data["otp"] != request.otp:
+        raise HTTPException(status_code=400, detail="Invalid OTP")
+    
+    # Find user
+    user = db.query(User).filter(User.email == request.email).first()
+    if not user:
+        del password_reset_storage[request.email]
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Update password
+    user.password_hash = get_password_hash(request.new_password)
+    db.commit()
+    
+    # Clean up storage
+    del password_reset_storage[request.email]
+    
+    return {
+        "message": "Password reset successfully. You can now login with your new password."
+    }
 
 # ========== Profile Endpoints ==========
 class ProfileUpdate(BaseModel):
