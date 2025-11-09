@@ -29,6 +29,15 @@ try:
 except ImportError:
     RESEND_AVAILABLE = False
 
+# Import email service (nodemailer-like)
+try:
+    from email_service import send_otp_email as send_otp_email_nodemailer
+    NODEMAILER_AVAILABLE = True
+except ImportError:
+    NODEMAILER_AVAILABLE = False
+    def send_otp_email_nodemailer(to: str, otp: str) -> bool:
+        return False
+
 # Load environment variables
 load_dotenv()
 
@@ -413,8 +422,8 @@ def generate_otp():
 
 def send_otp_email(email: str, otp: str):
     """
-    Send OTP to email using Resend (primary) or Gmail SMTP (fallback).
-    Supports both testing (console output) and production (actual email sending).
+    Send OTP to email using nodemailer-like email service (SMTP).
+    Falls back to Resend if configured, otherwise uses SMTP.
     """
     try:
         # Always print to console for testing/debugging
@@ -423,10 +432,21 @@ def send_otp_email(email: str, otp: str):
         print(f"Expires in: 10 minutes")
         print(f"{'='*60}\n")
         
+        # Try nodemailer-like service first (SMTP) - Clean and simple like nodemailer
+        if NODEMAILER_AVAILABLE:
+            try:
+                result = send_otp_email_nodemailer(email, otp)
+                if result:
+                    print(f"✅ OTP sent via nodemailer-like service (SMTP)")
+                    return True
+            except Exception as e:
+                print(f"⚠️  Nodemailer service error: {e}")
+                print(f"   Falling back to Resend/SMTP...\n")
+        
         # If email is not configured, just use console output
         if not EMAIL_CONFIGURED:
             print(f"ℹ️  Email credentials not configured. OTP shown above.")
-            print(f"    Configure RESEND_API_KEY or GMAIL_USER/GMAIL_PASS in .env\n")
+            print(f"    Configure SMTP_SERVER, SMTP_PORT, SMTP_USER, SMTP_PASS in .env\n")
             return True
         
         # Email HTML template
