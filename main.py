@@ -6,7 +6,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm, HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, ForeignKey, Text, Enum as SQLEnum, DateTime, text, Index, or_
 from sqlalchemy.orm import declarative_base, Session, sessionmaker, relationship, joinedload
-from pydantic import BaseModel, EmailStr, ConfigDict
+from pydantic import BaseModel, EmailStr, ConfigDict, field_validator
 from typing import Optional, List
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -287,6 +287,21 @@ class LoginRequest(BaseModel):
     password: str
     otp: str
 
+# Helper function for normalizing file paths (needed by UserResponse)
+def normalize_file_path(file_path: Optional[str]) -> Optional[str]:
+    """Normalize file path to just filename for frontend consumption"""
+    if not file_path:
+        return None
+    
+    # If it's an absolute path, extract just the filename
+    if os.path.isabs(file_path):
+        file_path = Path(file_path).name
+    # Remove 'uploads/' prefix if present
+    if file_path.startswith('uploads/') or file_path.startswith('uploads\\'):
+        file_path = file_path.replace('uploads/', '').replace('uploads\\', '')
+    # Ensure it's just the filename (relative to uploads/)
+    return Path(file_path).name
+
 class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     
@@ -306,6 +321,12 @@ class UserResponse(BaseModel):
     id_card_path: Optional[str] = None
     id_verified: bool
     created_at: datetime
+    
+    @field_validator('photo_path', 'id_card_path', mode='after')
+    @classmethod
+    def normalize_paths(cls, v: Optional[str]) -> Optional[str]:
+        """Normalize file paths to just filename"""
+        return normalize_file_path(v) if v else None
 
 class RegisterVerifyResponse(BaseModel):
     access_token: str
@@ -1929,8 +1950,32 @@ async def download_paper(
     return FileResponse(str(file_path), filename=paper.file_name)
 
 # ========== Helper Functions ==========
+def format_user_response(user: User) -> dict:
+    """Format user for response with normalized file paths"""
+    user_dict = {
+        "id": user.id,
+        "email": user.email,
+        "name": user.name,
+        "is_admin": user.is_admin,
+        "email_verified": user.email_verified,
+        "age": user.age,
+        "year": user.year,
+        "university": user.university,
+        "department": user.department,
+        "roll_no": user.roll_no,
+        "student_id": user.student_id,
+        "photo_path": normalize_file_path(user.photo_path),
+        "id_card_path": normalize_file_path(user.id_card_path),
+        "id_verified": user.id_verified,
+        "created_at": user.created_at
+    }
+    return user_dict
+
 def format_paper_response(paper: Paper, include_private_info: bool = False):
     """Format paper for response"""
+    # Normalize file_path to be relative to uploads/ for frontend consumption
+    file_path = normalize_file_path(paper.file_path)
+    
     paper_dict = {
         "id": paper.id,
         "course_id": paper.course_id,
@@ -1945,7 +1990,7 @@ def format_paper_response(paper: Paper, include_private_info: bool = False):
         "semester": paper.semester,
         "file_name": paper.file_name,
         "file_size": paper.file_size,
-        "file_path": paper.file_path,
+        "file_path": file_path,  # Normalized to just filename
         "status": paper.status,
         "uploaded_at": paper.uploaded_at,
         "reviewed_at": paper.reviewed_at,
