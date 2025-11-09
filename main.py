@@ -1918,12 +1918,36 @@ def download_paper(paper_id: int, db: Session = Depends(get_db)):
     if paper.status != SubmissionStatus.APPROVED:
         raise HTTPException(status_code=403, detail="Paper not approved yet")
     
+    # Construct file path - handle both absolute and relative paths
+    file_path = paper.file_path
+    if not os.path.isabs(file_path):
+        # If relative path, try to resolve it
+        # First try as-is (might already be relative to uploads/)
+        if not os.path.exists(file_path):
+            # Try relative to UPLOAD_DIR
+            file_path = UPLOAD_DIR / file_path.replace('uploads/', '').replace('uploads\\', '')
+        else:
+            file_path = Path(file_path)
+    else:
+        file_path = Path(file_path)
+    
+    # Resolve to absolute path
+    try:
+        file_path = file_path.resolve()
+        # Security: Ensure file is within uploads directory
+        uploads_dir = UPLOAD_DIR.resolve()
+        if not str(file_path).startswith(str(uploads_dir)):
+            raise HTTPException(status_code=403, detail="Access denied")
+    except Exception as e:
+        print(f"Error resolving file path: {e}")
+        raise HTTPException(status_code=404, detail="File path invalid")
+    
     # Check if file exists
-    if not os.path.exists(paper.file_path):
-        raise HTTPException(status_code=404, detail="File not found on server")
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail=f"File not found on server: {file_path}")
     
     from fastapi.responses import FileResponse
-    return FileResponse(paper.file_path, filename=paper.file_name)
+    return FileResponse(str(file_path), filename=paper.file_name)
 
 # ========== Helper Functions ==========
 def format_paper_response(paper: Paper, include_private_info: bool = False):
