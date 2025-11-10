@@ -2372,7 +2372,14 @@ def format_user_response(user: User) -> dict:
 def format_paper_response(paper: Paper, include_private_info: bool = False):
     """Format paper for response"""
     # Normalize file_path to be relative to uploads/ for frontend consumption
+    # Ensure file_path is never None - use original if normalization returns None
     file_path = normalize_file_path(paper.file_path)
+    if file_path is None and paper.file_path:
+        # If normalization failed but we have a file_path, use it as-is
+        file_path = paper.file_path
+    elif file_path is None:
+        # If no file_path at all, use empty string
+        file_path = ""
     
     paper_dict = {
         "id": paper.id,
@@ -2386,9 +2393,9 @@ def format_paper_response(paper: Paper, include_private_info: bool = False):
         "paper_type": paper.paper_type,
         "year": paper.year,
         "semester": paper.semester,
-        "file_name": paper.file_name,
+        "file_name": paper.file_name or "",  # Ensure file_name is never None
         "file_size": paper.file_size,
-        "file_path": file_path,  # Normalized to just filename
+        "file_path": file_path,  # Normalized to just filename, never None
         "status": paper.status,
         "uploaded_at": paper.uploaded_at,
         "reviewed_at": paper.reviewed_at,
