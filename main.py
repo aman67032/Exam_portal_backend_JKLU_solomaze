@@ -130,6 +130,7 @@ UPLOAD_DIR = Path(UPLOAD_DIR_STR)
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 # In-memory OTP storage (use Redis for production)
+# Structure: { email: { otp, expires_at, type, last_sent_at } }
 otp_storage = {}
 # In-memory registration data storage (use Redis for production)
 registration_storage = {}
@@ -628,16 +629,24 @@ def send_otp_email(email: str, otp: str):
             </body>
             </html>
             """
+        text_body = f"""Paper Portal - Verification Code
+
+Your verification code is: {otp}
+
+This code expires in 10 minutes. If you didn't request this code, you can ignore this email.
+"""
         
         # Try Resend first (recommended for production)
         if RESEND_CONFIGURED:
             try:
                 # Send email via Resend API
+                from_header = RESEND_FROM_EMAIL if "<" in RESEND_FROM_EMAIL else f"Paper Portal <{RESEND_FROM_EMAIL}>"
                 email_response = resend.Emails.send({
-                    "from": RESEND_FROM_EMAIL,
+                    "from": from_header,
                     "to": [email],
                     "subject": "Your Paper Portal Verification Code",
-                    "html": html_body
+                    "html": html_body,
+                    "text": text_body
                 })
                 
                 # Check if response is valid (Resend returns dict with 'id' or 'error')
@@ -676,35 +685,59 @@ def send_otp_email(email: str, otp: str):
                 print(f"   Falling back to SMTP...\n")
         
         # Fallback to SMTP if Resend fails or not configured
-        if SMTP_CONFIGURED:
+        # Prefer configured SMTP first; else, if we have a RESEND_API_KEY, attempt Resend SMTP smart fallback
+        use_smart_resend_smtp = False
+        smtp_server = SMTP_SERVER
+        smtp_port = SMTP_PORT
+        smtp_user = SMTP_USER
+        smtp_pass = SMTP_PASS
+        if not SMTP_CONFIGURED and RESEND_API_KEY:
+            # Smart fallback to Resend SMTP
+            use_smart_resend_smtp = True
+            smtp_server = "smtp.resend.com"
+            smtp_port = 587
+            smtp_user = "resend"
+            smtp_pass = RESEND_API_KEY
+
+        if SMTP_CONFIGURED or use_smart_resend_smtp:
             try:
                 message = MIMEMultipart()
-                message["From"] = SMTP_FROM_EMAIL
+                # Preserve display name if provided, else use configured SMTP_FROM_EMAIL
+                from_header = RESEND_FROM_EMAIL if "<" in RESEND_FROM_EMAIL else (SMTP_FROM_EMAIL or RESEND_FROM_EMAIL)
+                message["From"] = from_header
                 message["To"] = email
                 message["Subject"] = "Your Paper Portal Verification Code"
                 message.attach(MIMEText(html_body, "html"))
+                # Add text alternative for better deliverability
+                message.attach(MIMEText(text_body, "plain"))
                 
                 # Send via SMTP with timeout
-                with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10) as server:
+                with smtplib.SMTP(smtp_server, smtp_port, timeout=10) as server:
                     server.starttls()
-                    server.login(SMTP_USER, SMTP_PASS)
+                    if smtp_user and smtp_pass:
+                        server.login(smtp_user, smtp_pass)
                     server.send_message(message)
                 
-                print(f"✓ Email sent successfully via SMTP to {email}")
+                print(f"✓ Email sent successfully via SMTP ({smtp_server}) to {email}")
                 return True
                 
             except smtplib.SMTPAuthenticationError as e:
                 print(f"❌ SMTP authentication failed: {e}")
-                print(f"   Reason: Check SMTP_USER and SMTP_PASS credentials")
-                print(f"   Note: Use App Password (not regular password)")
-                print(f"   Check: https://myaccount.google.com/apppasswords\n")
+                if use_smart_resend_smtp:
+                    print(f"   Attempted Resend SMTP with provided API key. Ensure your sender domain is verified in Resend.")
+                    print(f"   Verify domain: https://resend.com/domains")
+                else:
+                    print(f"   Reason: Check SMTP_USER and SMTP_PASS credentials")
+                    print(f"   Note: Use App Password (not regular password)")
+                    print(f"   Check: https://myaccount.google.com/apppasswords")
+                print()
                 return True
                 
             except (smtplib.SMTPException, OSError) as e:
                 print(f"❌ SMTP error: {type(e).__name__}: {e}")
-                print(f"   Note: Railway may have SMTP network restrictions")
-                print(f"   Recommendation: Use Resend instead")
-                print(f"   Get free API key at https://resend.com\n")
+                print(f"   Note: Some platforms may have SMTP network restrictions")
+                print(f"   Recommendation: Use Resend API or verify your domain for any-recipient sending")
+                print(f"   Get API key: https://resend.com\n")
                 return True
             
             except Exception as e:
@@ -992,13 +1025,28 @@ def send_otp(request: SendOTPRequest, db: Session = Depends(get_db)):
             detail="Admins must use /admin-login endpoint. OTP is not required for admin login."
         )
     
+    # Cooldown: prevent rapid re-sends (e.g., 60 seconds)
+    cooldown_seconds = 60
+    existing = otp_storage.get(request.email)
+    if existing and "last_sent_at" in existing:
+        try:
+            seconds_since_last = (datetime.now(timezone.utc) - existing["last_sent_at"]).total_seconds()
+            if seconds_since_last < cooldown_seconds:
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"OTP already sent recently. Please wait {int(cooldown_seconds - seconds_since_last)} seconds."
+                )
+        except Exception:
+            pass
+    
     otp = generate_otp()
     
     # Store OTP with expiration (10 minutes) and type
     otp_storage[request.email] = {
         "otp": otp,
         "expires_at": datetime.now(timezone.utc) + timedelta(minutes=10),
-        "type": "login"
+        "type": "login",
+        "last_sent_at": datetime.now(timezone.utc)
     }
     
     # Send email
@@ -1097,6 +1145,20 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
     if len(request.password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
     
+    # Cooldown for registration OTP (avoid spamming)
+    cooldown_seconds = 60
+    existing = otp_storage.get(request.email)
+    if existing and existing.get("type") == "registration" and "last_sent_at" in existing:
+        try:
+            seconds_since_last = (datetime.now(timezone.utc) - existing["last_sent_at"]).total_seconds()
+            if seconds_since_last < cooldown_seconds:
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"OTP already sent recently. Please wait {int(cooldown_seconds - seconds_since_last)} seconds."
+                )
+        except Exception:
+            pass
+
     # Generate OTP
     otp = generate_otp()
     
@@ -1111,7 +1173,8 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
     otp_storage[request.email] = {
         "otp": otp,
         "expires_at": datetime.now(timezone.utc) + timedelta(minutes=10),
-        "type": "registration"
+        "type": "registration",
+        "last_sent_at": datetime.now(timezone.utc)
     }
     
     # Send email
